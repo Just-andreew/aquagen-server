@@ -1,0 +1,100 @@
+const admin = require('firebase-admin');
+
+const handleTriage = async (req, res) => {
+    try {
+        const message = req.body.message;
+        if (!message) return res.status(200).send({ success: true });
+
+        const rawText = message.text || message.caption || "";
+        const chatId = message.chat.id;
+        const technicianName = message.from?.first_name || "Field Tech";
+
+        const apiKey = process.env.GEMINI_API_KEY;
+        const botToken = process.env.TELEGRAM_BOT_TOKEN;
+
+        if (!apiKey || !botToken) return res.status(200).send({ success: false, error: 'Config Error' });
+
+        let imageBase64 = "";
+        let fileIdToFetch = null;
+
+        if (message.photo && message.photo.length > 0) fileIdToFetch = message.photo[message.photo.length - 1].file_id;
+        else if (message.video && (message.video.thumbnail || message.video.thumb)) fileIdToFetch = (message.video.thumbnail || message.video.thumb).file_id;
+
+        if (fileIdToFetch) {
+            try {
+                const fileInfoRes = await fetch(`https://api.telegram.org/bot${botToken}/getFile?file_id=${fileIdToFetch}`);
+                const fileInfo = await fileInfoRes.json();
+                if (fileInfo.ok) {
+                    const imageRes = await fetch(`https://api.telegram.org/file/bot${botToken}/${fileInfo.result.file_path}`);
+                    const arrayBuffer = await imageRes.arrayBuffer();
+                    imageBase64 = Buffer.from(arrayBuffer).toString('base64');
+                }
+            } catch (err) { console.error('Visual capture error extraction bypass:', err); }
+        }
+
+        if (!rawText.trim() && !imageBase64) return res.status(200).send({ success: true });
+
+        let combinedText = rawText || "[Visual Uploaded]";
+        let existingDocId = null;
+
+        const db = admin.firestore();
+        const recentLogs = await db.collection('logs').where('chat_id', '==', chatId).orderBy('timestamp', 'desc').limit(1).get();
+
+        // 3-Minute Temporal Buffer Processing Loop
+        if (!recentLogs.empty) {
+            const lastDoc = recentLogs.docs[0];
+            const lastLogData = lastDoc.data();
+            if (Date.now() - new Date(lastLogData.timestamp).getTime() <= 180000) {
+                existingDocId = lastDoc.id;
+                combinedText = `${lastLogData.data.notes ? `[Visual context: ${lastLogData.data.notes}] ` : ""}${lastLogData.data.original_text} ; ${rawText}`;
+            }
+        }
+
+        const geminiParts = [{ text: `You are an intelligent aquaculture operations triage engine for AquaGen Farm. Analyze parameters. Extract metrics into strict raw JSON object. No markdown blocks. Return ONLY raw JSON. {"event_type": "Categorize as 'Feeding', 'Weight Measurement', 'Water Quality', 'Harvesting', 'General Observation', or 'Unknown'", "ponds": [], "metrics": {"feed_amount": null, "average_weight_g": null, "water_parameters": null}, "ai_visual_verification": "Summarize what operations task is occurring based on data.", "confidence_score": 95} Message Context: "${combinedText}"` }];
+        if (imageBase64) geminiParts.push({ inline_data: { mime_type: "image/jpeg", data: imageBase64 } });
+
+        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${apiKey}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ contents: [{ parts: geminiParts }] })
+        });
+
+        const rawData = await response.json();
+
+        // Defensive Edge Case Calibration: Insulate against malformed LLM outputs
+        let aiData = { event_type: "General Observation", ponds: [], metrics: {}, confidence_score: 0, ai_visual_verification: "" };
+        try {
+            const textResponse = rawData.candidates[0].content.parts[0].text.replace(/```json/g, '').replace(/```/g, '').trim();
+            aiData = JSON.parse(textResponse);
+        } catch (parseErr) {
+            console.error("Gemini raw parser crash protection intercepted. Deploying fallback structural schemas:", parseErr);
+        }
+
+        const logEntry = {
+            timestamp: new Date().toISOString(),
+            technician_name: technicianName,
+            chat_id: chatId,
+            animal_type: "Fish",
+            event_type: aiData.event_type || "General Observation",
+            data: { ponds: aiData.ponds || [], metrics: aiData.metrics || {}, ai_confidence: aiData.confidence_score || 0, notes: aiData.ai_visual_verification || "", original_text: combinedText },
+            source: "Telegram",
+            audit_metadata: req.auditMetadata || {}
+        };
+
+        if (existingDocId) await db.collection('logs').doc(existingDocId).set(logEntry, { merge: true });
+        else await db.collection('logs').add(logEntry);
+
+        await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ chat_id: chatId, text: `✓ <b>Log Processed</b>\n<b>Action:</b> ${aiData.event_type || 'General Observation'}\n<blockquote>"${combinedText}"</blockquote>`, parse_mode: "HTML" })
+        });
+
+        res.status(200).send({ success: true });
+    } catch (error) {
+        console.error('Webhook absolute thread pipeline error:', error);
+        res.status(200).send({ success: false });
+    }
+};
+
+module.exports = { handleTriage };

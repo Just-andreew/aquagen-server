@@ -6,24 +6,25 @@ const cors = require('cors');
 // ============================================================================
 // 1. BULLETPROOF FIREBASE AUTHENTICATION (ENVIRONMENT VARIABLES)
 // ============================================================================
+// ============================================================================
+// 1. BULLETPROOF FIREBASE AUTHENTICATION (ENVIRONMENT VARIABLES)
+// ============================================================================
 let privateKey = process.env.FIREBASE_PRIVATE_KEY;
 
 if (privateKey) {
-    // Strip out any rogue wrapping quotes Vercel might have injected into the env
-    if (privateKey.startsWith('"') && privateKey.endsWith('"')) {
-        privateKey = privateKey.slice(1, -1);
-    }
-    // Convert literal escape \n sequences back into genuine cryptographic linebreaks
+    // 1. Remove leading/trailing quotes that Vercel sometimes injects
+    privateKey = privateKey.replace(/^"|"$/g, '');
+    // 2. Convert literal \n sequences back into genuine cryptographic linebreaks
     privateKey = privateKey.replace(/\\n/g, '\n');
 }
 
 const serviceAccount = {
-    projectId: process.env.FIREBASE_PROJECT_ID,
-    clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+    // .trim() removes any accidental spaces pasted before or after the strings
+    projectId: process.env.FIREBASE_PROJECT_ID ? process.env.FIREBASE_PROJECT_ID.trim() : undefined,
+    clientEmail: process.env.FIREBASE_CLIENT_EMAIL ? process.env.FIREBASE_CLIENT_EMAIL.trim() : undefined,
     privateKey: privateKey,
 };
 
-// Initialize Firebase Admin cleanly
 admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
 const db = admin.firestore();
 

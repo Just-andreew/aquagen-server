@@ -1,14 +1,43 @@
 const admin = require('firebase-admin');
+const { handleMenu } = require('./menu');
+const { handleReceipt, handleCategory, handleAmount } = require('./accounting');
 
 const handleTriage = async (req, res) => {
     try {
         const message = req.body.message;
         if (!message) return res.status(200).send({ success: true });
 
+        const chatId = String(message.chat.id);
         const rawText = message.text || message.caption || "";
-        const chatId = message.chat.id;
-        const technicianName = message.from?.first_name || "Field Tech";
 
+        const db = admin.firestore();
+        const sessionDoc = await db.collection('telegram_sessions').doc(chatId).get();
+
+        if (rawText.trim() === '/start' || rawText.trim() === '/menu') {
+            return await handleMenu(req, res);
+        }
+
+        const session = sessionDoc.exists ? sessionDoc.data() : null;
+
+        if (session) {
+            switch (session.current_step) {
+                case 'AWAITING_RECEIPT':
+                    return await handleReceipt(req, res, session);
+                case 'AWAITING_CATEGORY':
+                    return await handleCategory(req, res, session);
+                case 'AWAITING_AMOUNT':
+                    return await handleAmount(req, res, session);
+                default:
+                    if (!session.current_step.startsWith('AWAITING_LOG_')) {
+                        return await handleMenu(req, res);
+                    }
+            }
+        }
+
+        // ==========================================
+        // AI TRIAGE ENGINE (Restored)
+        // ==========================================
+        const technicianName = message.from?.first_name || "Field Tech";
         const apiKey = process.env.GEMINI_API_KEY;
         const botToken = process.env.TELEGRAM_BOT_TOKEN;
 
@@ -37,7 +66,15 @@ const handleTriage = async (req, res) => {
         let combinedText = rawText || "[Visual Uploaded]";
         let existingDocId = null;
 
-        const db = admin.firestore();
+        // Context injection if user selected a log type from the menu
+        let specificLogContext = "";
+        if (session && session.current_step.startsWith('AWAITING_LOG_')) {
+            const logType = session.current_step.replace('AWAITING_LOG_', '');
+            specificLogContext = `\nThe user explicitly categorized this action as: ${logType}. Ensure this is reflected.`;
+            // Clean up the session since we are processing it now
+            await db.collection('telegram_sessions').doc(chatId).delete();
+        }
+
         const recentLogs = await db.collection('logs').where('chat_id', '==', chatId).orderBy('timestamp', 'desc').limit(1).get();
 
         // 3-Minute Temporal Buffer Processing Loop
@@ -50,7 +87,9 @@ const handleTriage = async (req, res) => {
             }
         }
 
-        const geminiParts = [{ text: `You are an intelligent aquaculture operations triage engine for AquaGen Farm. Analyze parameters. Extract metrics into strict raw JSON object. No markdown blocks. Return ONLY raw JSON. {"event_type": "Categorize as 'Feeding', 'Weight Measurement', 'Water Quality', 'Harvesting', 'General Observation', or 'Unknown'", "ponds": [], "metrics": {"feed_amount": null, "average_weight_g": null, "water_parameters": null}, "ai_visual_verification": "Summarize what operations task is occurring based on data.", "confidence_score": 95} Message Context: "${combinedText}"` }];
+        const systemPrompt = `You are an intelligent aquaculture operations triage engine for AquaGen Farm. Analyze parameters. Extract metrics into strict raw JSON object. No markdown blocks. Return ONLY raw JSON. {"event_type": "Categorize as 'Feeding', 'Cleaning', 'Inventory Check', 'General', 'Sampling', 'Mortality', 'Harvest', or 'Unknown'", "ponds": [], "metrics": {"feed_amount": null, "average_weight_g": null, "water_parameters": null, "mortality_count": null}, "ai_visual_verification": "Summarize what operations task is occurring based on data.", "confidence_score": 95}${specificLogContext}\nMessage Context: "${combinedText}"`;
+
+        const geminiParts = [{ text: systemPrompt }];
         if (imageBase64) geminiParts.push({ inline_data: { mime_type: "image/jpeg", data: imageBase64 } });
 
         const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${apiKey}`, {
@@ -92,7 +131,7 @@ const handleTriage = async (req, res) => {
 
         res.status(200).send({ success: true });
     } catch (error) {
-        console.error('Webhook absolute thread pipeline error:', error);
+        console.error('Webhook triage pipeline error:', error);
         res.status(200).send({ success: false });
     }
 };

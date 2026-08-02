@@ -75,13 +75,16 @@ const handleTriage = async (req, res) => {
             await db.collection('telegram_sessions').doc(chatId).delete();
         }
 
+        const messageTimeMs = message.date ? message.date * 1000 : Date.now();
         const recentLogs = await db.collection('logs').where('chat_id', '==', chatId).orderBy('timestamp', 'desc').limit(1).get();
 
-        // 3-Minute Temporal Buffer Processing Loop
+        // 30-Minute Temporal Buffer Processing Loop based on Telegram message time
         if (!recentLogs.empty) {
             const lastDoc = recentLogs.docs[0];
             const lastLogData = lastDoc.data();
-            if (Date.now() - new Date(lastLogData.timestamp).getTime() <= 180000) {
+            const lastLogTimeMs = lastLogData.message_time_ms || new Date(lastLogData.timestamp).getTime();
+            
+            if (Math.abs(messageTimeMs - lastLogTimeMs) <= 1800000) { // 30 minutes
                 existingDocId = lastDoc.id;
                 combinedText = `${lastLogData.data.notes ? `[Visual context: ${lastLogData.data.notes}] ` : ""}${lastLogData.data.original_text} ; ${rawText}`;
             }
@@ -110,7 +113,8 @@ const handleTriage = async (req, res) => {
         }
 
         const logEntry = {
-            timestamp: new Date().toISOString(),
+            timestamp: new Date(messageTimeMs).toISOString(),
+            message_time_ms: messageTimeMs,
             technician_name: technicianName,
             chat_id: chatId,
             animal_type: "Fish",

@@ -76,17 +76,15 @@ const handleTriage = async (req, res) => {
         }
 
         const messageTimeMs = message.date ? message.date * 1000 : Date.now();
-        const recentLogs = await db.collection('logs').where('chat_id', '==', chatId).orderBy('timestamp', 'desc').limit(1).get();
-
-        // 30-Minute Temporal Buffer Processing Loop based on Telegram message time
-        if (!recentLogs.empty) {
-            const lastDoc = recentLogs.docs[0];
-            const lastLogData = lastDoc.data();
-            const lastLogTimeMs = lastLogData.message_time_ms || new Date(lastLogData.timestamp).getTime();
-            
-            if (Math.abs(messageTimeMs - lastLogTimeMs) <= 1800000) { // 30 minutes
-                existingDocId = lastDoc.id;
-                combinedText = `${lastLogData.data.notes ? `[Visual context: ${lastLogData.data.notes}] ` : ""}${lastLogData.data.original_text} ; ${rawText}`;
+        // 30-Minute Temporal Buffer Processing Loop using session tracking (avoids composite index requirements)
+        if (session && session.last_log_id && session.last_log_time_ms) {
+            if (Math.abs(messageTimeMs - session.last_log_time_ms) <= 1800000) { // 30 minutes
+                const lastDoc = await db.collection('logs').doc(session.last_log_id).get();
+                if (lastDoc.exists) {
+                    const lastLogData = lastDoc.data();
+                    existingDocId = lastDoc.id;
+                    combinedText = `${lastLogData.data.notes ? `[Visual context: ${lastLogData.data.notes}] ` : ""}${lastLogData.data.original_text} ; ${rawText}`;
+                }
             }
         }
 
@@ -124,8 +122,18 @@ const handleTriage = async (req, res) => {
             audit_metadata: req.auditMetadata || {}
         };
 
-        if (existingDocId) await db.collection('logs').doc(existingDocId).set(logEntry, { merge: true });
-        else await db.collection('logs').add(logEntry);
+        if (existingDocId) {
+            await db.collection('logs').doc(existingDocId).set(logEntry, { merge: true });
+        } else {
+            const newDocRef = await db.collection('logs').add(logEntry);
+            existingDocId = newDocRef.id;
+        }
+
+        // Store last log reference in session to avoid complex Firestore composite indices
+        await db.collection('telegram_sessions').doc(chatId).set({
+            last_log_id: existingDocId,
+            last_log_time_ms: messageTimeMs
+        }, { merge: true });
 
         await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
             method: 'POST',

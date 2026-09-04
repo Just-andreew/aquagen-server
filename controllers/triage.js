@@ -94,7 +94,7 @@ const handleTriage = async (req, res) => {
         const systemPrompt = `You are an intelligent aquaculture operations triage engine for AquaGen Farm. Analyze parameters. Extract metrics into strict raw JSON object. No markdown blocks. Return ONLY raw JSON. {"event_type": "Categorize as 'Feeding', 'Cleaning', 'Inventory Check', 'General', 'Sampling', 'Mortality', 'Harvest', or 'Unknown'", "ponds": [], "metrics": {"feed_amount": null, "average_weight_g": null, "water_parameters": null, "mortality_count": null}, "ai_visual_verification": "Summarize what operations task is occurring based on data.", "confidence_score": 95}${specificLogContext}\nMessage Context: "${combinedText}"`;
 
         const geminiParts = [{ text: systemPrompt }];
-        if (imageBase64) geminiParts.push({ inline_data: { mime_type: "image/jpeg", data: imageBase64 } });
+        if (imageBase64) geminiParts.push({ inlineData: { mimeType: "image/jpeg", data: imageBase64 } });
 
         const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`, {
             method: 'POST',

@@ -28,9 +28,10 @@ const handleTriage = async (req, res) => {
                 case 'AWAITING_AMOUNT':
                     return await handleAmount(req, res, session);
                 default:
-                    if (!session.current_step.startsWith('AWAITING_LOG_')) {
+                    if (session.current_step && !session.current_step.startsWith('AWAITING_LOG_')) {
                         return await handleMenu(req, res);
                     }
+                    break;
             }
         }
 
@@ -63,12 +64,11 @@ const handleTriage = async (req, res) => {
 
         if (!rawText.trim() && !imageBase64) return res.status(200).send({ success: true });
 
-        let combinedText = rawText || "[Visual Uploaded]";
-        let existingDocId = null;
+        const combinedText = rawText || "[Visual Uploaded]";
 
         // Context injection if user selected a log type from the menu
         let specificLogContext = "";
-        if (session && session.current_step.startsWith('AWAITING_LOG_')) {
+        if (session && session.current_step && session.current_step.startsWith('AWAITING_LOG_')) {
             const logType = session.current_step.replace('AWAITING_LOG_', '');
             specificLogContext = `\nThe user explicitly categorized this action as: ${logType}. Ensure this is reflected.`;
             // Clean up the session since we are processing it now
@@ -76,20 +76,6 @@ const handleTriage = async (req, res) => {
         }
 
         const messageTimeMs = message.date ? message.date * 1000 : Date.now();
-        // 30-Minute Temporal Buffer Processing Loop using session tracking (avoids composite index requirements)
-        if (session && session.last_log_id && session.last_log_time_ms) {
-            if (Math.abs(messageTimeMs - session.last_log_time_ms) <= 1800000) { // 30 minutes
-                const lastDoc = await db.collection('logs').doc(session.last_log_id).get();
-                if (lastDoc.exists) {
-                    const lastLogData = lastDoc.data();
-                    existingDocId = lastDoc.id;
-                    
-                    const prevNotes = lastLogData.data?.notes || "";
-                    const prevText = lastLogData.data?.original_text || lastLogData.text || "";
-                    combinedText = `${prevNotes ? `[Visual context: ${prevNotes}] ` : ""}${prevText} ; ${rawText}`;
-                }
-            }
-        }
 
         const systemPrompt = `You are an intelligent aquaculture operations triage engine for AquaGen Farm. Analyze parameters. Extract metrics into strict raw JSON object. No markdown blocks. Return ONLY raw JSON. {"event_type": "Categorize as 'Feeding', 'Cleaning', 'Inventory Check', 'General', 'Sampling', 'Mortality', 'Harvest', or 'Unknown'", "ponds": [], "metrics": {"feed_amount": null, "average_weight_g": null, "water_parameters": null, "mortality_count": null}, "ai_visual_verification": "Summarize what operations task is occurring based on data.", "confidence_score": 95}${specificLogContext}\nMessage Context: "${combinedText}"`;
 
@@ -99,18 +85,25 @@ const handleTriage = async (req, res) => {
         const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ contents: [{ parts: geminiParts }] })
+            body: JSON.stringify({ 
+                contents: [{ parts: geminiParts }],
+                generationConfig: { responseMimeType: "application/json" }
+            })
         });
 
         const rawData = await response.json();
+        let geminiRawText = "";
+        if (rawData && rawData.candidates && rawData.candidates[0] && rawData.candidates[0].content && rawData.candidates[0].content.parts && rawData.candidates[0].content.parts[0]) {
+            geminiRawText = rawData.candidates[0].content.parts[0].text || "";
+        }
 
         // Defensive Edge Case Calibration: Insulate against malformed LLM outputs
         let aiData = { event_type: "General Observation", ponds: [], metrics: {}, confidence_score: 0, ai_visual_verification: "" };
         try {
-            const textResponse = rawData.candidates[0].content.parts[0].text.replace(/```json/g, '').replace(/```/g, '').trim();
-            aiData = JSON.parse(textResponse);
+            const cleanText = geminiRawText.replace(/```(?:json)?\n?/g, '').replace(/```/g, '').trim();
+            aiData = JSON.parse(cleanText || "{}"); // Fallback to avoid syntax error on empty
         } catch (parseErr) {
-            console.error("Gemini raw parser crash protection intercepted. Deploying fallback structural schemas:", parseErr);
+            console.error("Gemini raw parser crash protection intercepted. Deploying fallback structural schemas:", parseErr, "\nRaw Text was:", geminiRawText);
         }
 
         const logEntry = {
@@ -125,18 +118,11 @@ const handleTriage = async (req, res) => {
             audit_metadata: req.auditMetadata || {}
         };
 
-        if (existingDocId) {
-            await db.collection('logs').doc(existingDocId).set(logEntry, { merge: true });
-        } else {
-            const newDocRef = await db.collection('logs').add(logEntry);
-            existingDocId = newDocRef.id;
+        try {
+            await db.collection('logs').add(logEntry);
+        } catch (dbError) {
+            console.error("Database Write Error:", dbError);
         }
-
-        // Store last log reference in session to avoid complex Firestore composite indices
-        await db.collection('telegram_sessions').doc(chatId).set({
-            last_log_id: existingDocId,
-            last_log_time_ms: messageTimeMs
-        }, { merge: true });
 
         await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
             method: 'POST',

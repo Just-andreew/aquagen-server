@@ -80,7 +80,30 @@ const handleTriage = async (req, res) => {
 
         const messageTimeMs = message.date ? message.date * 1000 : Date.now();
 
-        const systemPrompt = `You are an intelligent aquaculture operations triage engine for AquaGen Farm. Analyze parameters. Extract metrics into strict raw JSON object. No markdown blocks. Return ONLY raw JSON. {"event_type": "Categorize as 'Feeding', 'Cleaning', 'Inventory Check', 'General', 'Sampling', 'Mortality', 'Harvest', or 'Unknown'. (Hint: Shorthand like 'A1 2kg 4mm' or images of feed/scales with weights/sizes must be categorized as 'Feeding')", "ponds": [], "metrics": {"feed_amount": null, "pellet_size": null, "average_weight_g": null, "water_parameters": null, "mortality_count": null}, "ai_visual_verification": "Summarize what operations task is occurring based on data.", "confidence_score": 95}${specificLogContext}\nMessage Context: "${combinedText}"`;
+        const systemPrompt = `You are an intelligent aquaculture operations triage engine for AquaGen Farm. Analyze the text parameters and visual evidence.
+
+CRITICAL INSTRUCTIONS:
+1. REJECTION: If the image or text is completely unrelated to fish farming or aquaculture (e.g., a random phone screenshot, a selfie, a meme, unrelated objects), you MUST set "event_type" to "Irrelevant".
+2. INFERRING ACTION: Use context to determine the action. If you see shorthand like "A1 2kg 4mm" AND/OR an image of feed on a scale, intelligently deduce if it's a "Feeding" event. Do not blindly assume any bucket is feeding unless the context supports it (e.g., text mentioning amounts, tanks, or feed sizes).
+3. If it's a valid farm image but no specific action is clear, use "General Observation".
+
+Return your analysis as a strict raw JSON object. Do not use markdown blocks.
+
+JSON Schema:
+{
+  "event_type": "Must be one of: 'Feeding', 'Cleaning', 'Inventory Check', 'General Observation', 'Sampling', 'Mortality', 'Harvest', 'Unknown', or 'Irrelevant'",
+  "ponds": ["Array of pond tags, e.g., 'A1'"],
+  "metrics": {
+    "feed_amount": "Amount of feed with units, e.g., '2kg' or '0.5kg'",
+    "pellet_size": "Pellet size, e.g., '4mm'",
+    "average_weight_g": "Fish weight in grams",
+    "water_parameters": "Key-value pairs",
+    "mortality_count": "Number of dead fish"
+  },
+  "ai_visual_verification": "Summary of operations task or reason for rejection",
+  "confidence_score": 95
+}${specificLogContext}
+Message Context: "${combinedText}"`;
 
         const geminiParts = [{ text: systemPrompt }];
         if (imageBase64) geminiParts.push({ inlineData: { mimeType: "image/jpeg", data: imageBase64 } });
@@ -107,6 +130,15 @@ const handleTriage = async (req, res) => {
             aiData = JSON.parse(cleanText || "{}"); // Fallback to avoid syntax error on empty
         } catch (parseErr) {
             console.error("Gemini raw parser crash protection intercepted. Deploying fallback structural schemas:", parseErr, "\nRaw Text was:", geminiRawText);
+        }
+
+        if (aiData.event_type === "Irrelevant") {
+            await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ chat_id: chatId, text: `❌ <b>Rejected</b>\nThis upload does not appear to be related to farm operations.\n<i>Reason: ${aiData.ai_visual_verification || 'Irrelevant content'}</i>`, parse_mode: "HTML" })
+            });
+            return res.status(200).send({ success: true });
         }
 
         if (aiData.event_type === "Feeding") {

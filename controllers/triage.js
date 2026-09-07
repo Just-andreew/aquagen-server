@@ -80,7 +80,7 @@ const handleTriage = async (req, res) => {
 
         const messageTimeMs = message.date ? message.date * 1000 : Date.now();
 
-        const systemPrompt = `You are an intelligent aquaculture operations triage engine for AquaGen Farm. Analyze parameters. Extract metrics into strict raw JSON object. No markdown blocks. Return ONLY raw JSON. {"event_type": "Categorize as 'Feeding', 'Cleaning', 'Inventory Check', 'General', 'Sampling', 'Mortality', 'Harvest', or 'Unknown'", "ponds": [], "metrics": {"feed_amount": null, "pellet_size": null, "average_weight_g": null, "water_parameters": null, "mortality_count": null}, "ai_visual_verification": "Summarize what operations task is occurring based on data.", "confidence_score": 95}${specificLogContext}\nMessage Context: "${combinedText}"`;
+        const systemPrompt = `You are an intelligent aquaculture operations triage engine for AquaGen Farm. Analyze parameters. Extract metrics into strict raw JSON object. No markdown blocks. Return ONLY raw JSON. {"event_type": "Categorize as 'Feeding', 'Cleaning', 'Inventory Check', 'General', 'Sampling', 'Mortality', 'Harvest', or 'Unknown'. (Hint: Shorthand like 'A1 2kg 4mm' or images of feed/scales with weights/sizes must be categorized as 'Feeding')", "ponds": [], "metrics": {"feed_amount": null, "pellet_size": null, "average_weight_g": null, "water_parameters": null, "mortality_count": null}, "ai_visual_verification": "Summarize what operations task is occurring based on data.", "confidence_score": 95}${specificLogContext}\nMessage Context: "${combinedText}"`;
 
         const geminiParts = [{ text: systemPrompt }];
         if (imageBase64) geminiParts.push({ inlineData: { mimeType: "image/jpeg", data: imageBase64 } });

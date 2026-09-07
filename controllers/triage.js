@@ -1,6 +1,7 @@
 const admin = require('firebase-admin');
 const { handleMenu } = require('./menu');
 const { handleReceipt, handleCategory, handleAmount } = require('./accounting');
+const { handleFeedConfirmation } = require('./operations');
 
 const handleTriage = async (req, res) => {
     try {
@@ -27,6 +28,8 @@ const handleTriage = async (req, res) => {
                     return await handleCategory(req, res, session);
                 case 'AWAITING_AMOUNT':
                     return await handleAmount(req, res, session);
+                case 'AWAITING_FEED_CONFIRMATION':
+                    return await handleFeedConfirmation(req, res, session);
                 default:
                     if (session.current_step && !session.current_step.startsWith('AWAITING_LOG_')) {
                         return await handleMenu(req, res);
@@ -77,7 +80,7 @@ const handleTriage = async (req, res) => {
 
         const messageTimeMs = message.date ? message.date * 1000 : Date.now();
 
-        const systemPrompt = `You are an intelligent aquaculture operations triage engine for AquaGen Farm. Analyze parameters. Extract metrics into strict raw JSON object. No markdown blocks. Return ONLY raw JSON. {"event_type": "Categorize as 'Feeding', 'Cleaning', 'Inventory Check', 'General', 'Sampling', 'Mortality', 'Harvest', or 'Unknown'", "ponds": [], "metrics": {"feed_amount": null, "average_weight_g": null, "water_parameters": null, "mortality_count": null}, "ai_visual_verification": "Summarize what operations task is occurring based on data.", "confidence_score": 95}${specificLogContext}\nMessage Context: "${combinedText}"`;
+        const systemPrompt = `You are an intelligent aquaculture operations triage engine for AquaGen Farm. Analyze parameters. Extract metrics into strict raw JSON object. No markdown blocks. Return ONLY raw JSON. {"event_type": "Categorize as 'Feeding', 'Cleaning', 'Inventory Check', 'General', 'Sampling', 'Mortality', 'Harvest', or 'Unknown'", "ponds": [], "metrics": {"feed_amount": null, "pellet_size": null, "average_weight_g": null, "water_parameters": null, "mortality_count": null}, "ai_visual_verification": "Summarize what operations task is occurring based on data.", "confidence_score": 95}${specificLogContext}\nMessage Context: "${combinedText}"`;
 
         const geminiParts = [{ text: systemPrompt }];
         if (imageBase64) geminiParts.push({ inlineData: { mimeType: "image/jpeg", data: imageBase64 } });
@@ -104,6 +107,32 @@ const handleTriage = async (req, res) => {
             aiData = JSON.parse(cleanText || "{}"); // Fallback to avoid syntax error on empty
         } catch (parseErr) {
             console.error("Gemini raw parser crash protection intercepted. Deploying fallback structural schemas:", parseErr, "\nRaw Text was:", geminiRawText);
+        }
+
+        if (aiData.event_type === "Feeding") {
+            const amount = aiData.metrics?.feed_amount || "Unknown amount";
+            const pelletSize = aiData.metrics?.pellet_size || "Unknown size";
+            const ponds = (aiData.ponds && aiData.ponds.length > 0) ? aiData.ponds.join(", ") : "Unknown pond";
+
+            await db.collection('telegram_sessions').doc(chatId).set({
+                current_step: 'AWAITING_FEED_CONFIRMATION',
+                log_data: aiData,
+                original_text: combinedText,
+                technician_name: technicianName,
+                message_time_ms: messageTimeMs,
+                audit_metadata: req.auditMetadata || {},
+                updated_at: new Date().toISOString()
+            });
+
+            const msgText = `Parsed: Fed ${amount} of ${pelletSize} feed to ${ponds}.\n\nIs this correct? Reply YES to confirm, or reply NO to cancel and submit again.`;
+
+            await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ chat_id: chatId, text: msgText })
+            });
+
+            return res.status(200).send({ success: true });
         }
 
         const logEntry = {

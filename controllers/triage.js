@@ -94,11 +94,12 @@ JSON Schema:
   "event_type": "Must be one of: 'Feeding', 'Cleaning', 'Inventory Check', 'General Observation', 'Sampling', 'Mortality', 'Harvest', 'Unknown', or 'Irrelevant'",
   "ponds": ["Array of pond tags, e.g., 'A1'"],
   "metrics": {
-    "feed_amount": "Amount of feed with units, e.g., '2kg' or '0.5kg'",
+    "feed_amount": "Amount of feed IN KILOGRAMS ONLY (e.g. '2' or '0.5'). Convert grams to kg if necessary.",
     "pellet_size": "Pellet size, e.g., '4mm'",
     "average_weight_g": "Fish weight in grams",
     "water_parameters": "Key-value pairs",
-    "mortality_count": "Number of dead fish"
+    "mortality_count": "Number of dead fish",
+    "time_recorded": "Manually logged time if provided (e.g. '9:00am')"
   },
   "ai_visual_verification": "Summary of operations task or reason for rejection",
   "confidence_score": 95
@@ -108,7 +109,7 @@ Message Context: "${combinedText}"`;
         const geminiParts = [{ text: systemPrompt }];
         if (imageBase64) geminiParts.push({ inlineData: { mimeType: "image/jpeg", data: imageBase64 } });
 
-        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`, {
+        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${apiKey}`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ 

@@ -23,8 +23,12 @@ const handleFeedConfirmation = async (req, res, session) => {
 
         if (text === "yes" || text === "y") {
             // Do deduction and log
-            const amountMatch = String(aiData.metrics?.feed_amount || "").match(/[\d.]+/);
-            const amount = amountMatch ? parseFloat(amountMatch[0]) : 0;
+            const feedAmountStr = String(aiData.metrics?.feed_amount || "").toLowerCase();
+            const amountMatch = feedAmountStr.match(/[\d.]+/);
+            let amount = amountMatch ? parseFloat(amountMatch[0]) : 0;
+            if (feedAmountStr.includes('g') && !feedAmountStr.includes('kg')) {
+                amount = amount / 1000;
+            }
             const pelletSize = String(aiData.metrics?.pellet_size || "").toLowerCase().replace(/\s/g, '');
             
             let deductionMessage = "";
@@ -90,7 +94,7 @@ Current data: ${JSON.stringify(aiData)}
 User correction: "${message.text}"
 Update the JSON to reflect the correction. Return ONLY raw JSON matching the structure exactly.`;
             
-            const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`, {
+            const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${apiKey}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ 

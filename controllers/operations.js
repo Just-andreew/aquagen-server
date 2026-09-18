@@ -19,7 +19,7 @@ const processFeedingDeduction = async (aiData, db) => {
         invSnapshot.forEach(doc => {
             const item = doc.data();
             const itemName = (item.item_name || "").toLowerCase().replace(/\s/g, '');
-            if (itemName.includes('feed') && itemName.includes(pelletSize)) {
+            if (pelletSize && pelletSize !== 'unknownsize' && itemName.includes(pelletSize)) {
                 targetItemDoc = doc;
             }
         });
@@ -33,6 +33,15 @@ const processFeedingDeduction = async (aiData, db) => {
                 quantity: newQty,
                 status: newStatus,
                 last_updated: new Date().toISOString()
+            });
+
+            await db.collection('inventory_history').add({
+                item_id: targetItemDoc.id,
+                item_name: targetItemDoc.data().item_name || 'Unknown',
+                change: -amount,
+                reason: "Telegram Auto-Deduction",
+                changed_by_name: "Telegram Bot",
+                timestamp: new Date().toISOString()
             });
             
             deductionMessage = `\n\n(Deducted ${amount} units of ${targetItemDoc.data().item_name} from inventory)`;

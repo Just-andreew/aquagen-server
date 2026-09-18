@@ -1,7 +1,7 @@
 const admin = require('firebase-admin');
 const { handleMenu } = require('./menu');
 const { handleReceipt, handleCategory, handleAmount } = require('./accounting');
-const { handleFeedConfirmation } = require('./operations');
+const { handleFeedConfirmation, processFeedingDeduction } = require('./operations');
 
 const handleTriage = async (req, res) => {
     try {
@@ -69,13 +69,31 @@ const handleTriage = async (req, res) => {
 
         const combinedText = rawText || "[Visual Uploaded]";
 
-        // Context injection if user selected a log type from the menu
         let specificLogContext = "";
         if (session && session.current_step && session.current_step.startsWith('AWAITING_LOG_')) {
             const logType = session.current_step.replace('AWAITING_LOG_', '');
             specificLogContext = `\nThe user explicitly categorized this action as: ${logType}. Ensure this is reflected.`;
             // Clean up the session since we are processing it now
             await db.collection('telegram_sessions').doc(chatId).delete();
+        }
+
+        // ==========================================
+        // SLIDING CONTEXT MEMORY
+        // ==========================================
+        let recentContext = session?.recent_context || [];
+        const oneHourAgo = Date.now() - (60 * 60 * 1000);
+        recentContext = recentContext.filter(c => c.timestamp > oneHourAgo);
+
+        if (rawText.trim() && !imageBase64) {
+            recentContext.push({ text: rawText.trim(), timestamp: Date.now() });
+            if (recentContext.length > 5) recentContext.shift();
+            // Save the sliding context
+            await db.collection('telegram_sessions').doc(chatId).set({ recent_context: recentContext }, { merge: true });
+        }
+
+        let contextString = recentContext.map(c => `[${new Date(c.timestamp).toLocaleTimeString()}] ${c.text}`).join('\n');
+        if (contextString) {
+            contextString = `\nRecent Chat Context from User (use this to fill in missing details like 'time_recorded'):\n${contextString}`;
         }
 
         const messageTimeMs = message.date ? message.date * 1000 : Date.now();
@@ -103,7 +121,7 @@ JSON Schema:
   },
   "ai_visual_verification": "Summary of operations task or reason for rejection",
   "confidence_score": 95
-}${specificLogContext}
+}${specificLogContext}${contextString}
 Message Context: "${combinedText}"`;
 
         const geminiParts = [{ text: systemPrompt }];
@@ -142,30 +160,39 @@ Message Context: "${combinedText}"`;
             return res.status(200).send({ success: true });
         }
 
+        let deductionMessage = "";
+
         if (aiData.event_type === "Feeding") {
             const amount = aiData.metrics?.feed_amount || "Unknown amount";
             const pelletSize = aiData.metrics?.pellet_size || "Unknown size";
             const ponds = (aiData.ponds && aiData.ponds.length > 0) ? aiData.ponds.join(", ") : "Unknown pond";
 
-            await db.collection('telegram_sessions').doc(chatId).set({
-                current_step: 'AWAITING_FEED_CONFIRMATION',
-                log_data: aiData,
-                original_text: combinedText,
-                technician_name: technicianName,
-                message_time_ms: messageTimeMs,
-                audit_metadata: req.auditMetadata || {},
-                updated_at: new Date().toISOString()
-            });
+            const isConfident = aiData.confidence_score >= 85 && amount !== "Unknown amount" && pelletSize !== "Unknown size" && ponds !== "Unknown pond";
 
-            const msgText = `Parsed: Fed ${amount} of ${pelletSize} feed to ${ponds}.\n\nIs this correct? Reply YES to confirm, or reply NO to cancel and submit again.`;
+            if (!isConfident) {
+                await db.collection('telegram_sessions').doc(chatId).set({
+                    current_step: 'AWAITING_FEED_CONFIRMATION',
+                    log_data: aiData,
+                    original_text: combinedText,
+                    technician_name: technicianName,
+                    message_time_ms: messageTimeMs,
+                    audit_metadata: req.auditMetadata || {},
+                    updated_at: new Date().toISOString()
+                }, { merge: true });
 
-            await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ chat_id: chatId, text: msgText })
-            });
+                const msgText = `Parsed: Fed ${amount} of ${pelletSize} feed to ${ponds}.\n\nIs this correct? Reply YES to confirm, or reply NO to cancel and submit again.`;
 
-            return res.status(200).send({ success: true });
+                await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ chat_id: chatId, text: msgText })
+                });
+
+                return res.status(200).send({ success: true });
+            }
+            
+            // Auto-Log High Confidence Feedings
+            deductionMessage = await processFeedingDeduction(aiData, db);
         }
 
         const logEntry = {
@@ -189,7 +216,7 @@ Message Context: "${combinedText}"`;
         await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ chat_id: chatId, text: `✓ <b>Log Processed</b>\n<b>Action:</b> ${aiData.event_type || 'General Observation'}\n<blockquote>"${combinedText}"</blockquote>`, parse_mode: "HTML" })
+            body: JSON.stringify({ chat_id: chatId, text: `✓ <b>Log Processed</b>\n<b>Action:</b> ${aiData.event_type || 'General Observation'}\n<blockquote>"${combinedText}"</blockquote>${deductionMessage}`, parse_mode: "HTML" })
         });
 
         res.status(200).send({ success: true });

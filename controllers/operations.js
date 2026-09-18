@@ -1,5 +1,50 @@
 const admin = require('firebase-admin');
 
+const processFeedingDeduction = async (aiData, db) => {
+    const feedAmountStr = String(aiData.metrics?.feed_amount || "").toLowerCase();
+    const amountMatch = feedAmountStr.match(/[\d.]+/);
+    let amount = amountMatch ? parseFloat(amountMatch[0]) : 0;
+    if (feedAmountStr.includes('g') && !feedAmountStr.includes('kg')) {
+        amount = amount / 1000;
+    }
+    const pelletSize = String(aiData.metrics?.pellet_size || "").toLowerCase().replace(/\s/g, '');
+    
+    let deductionMessage = "";
+
+    if (amount > 0) {
+        const inventoryRef = db.collection('inventory');
+        const invSnapshot = await inventoryRef.get();
+        let targetItemDoc = null;
+        
+        invSnapshot.forEach(doc => {
+            const item = doc.data();
+            const itemName = (item.item_name || "").toLowerCase().replace(/\s/g, '');
+            if (itemName.includes('feed') && itemName.includes(pelletSize)) {
+                targetItemDoc = doc;
+            }
+        });
+
+        if (targetItemDoc) {
+            const currentQty = targetItemDoc.data().quantity || 0;
+            const newQty = Math.max(0, currentQty - amount);
+            const newStatus = newQty === 0 ? 'out_of_stock' : newQty < 20 ? 'low' : 'in_stock';
+            
+            await inventoryRef.doc(targetItemDoc.id).update({
+                quantity: newQty,
+                status: newStatus,
+                last_updated: new Date().toISOString()
+            });
+            
+            deductionMessage = `\n\n(Deducted ${amount} units of ${targetItemDoc.data().item_name} from inventory)`;
+            aiData.ai_visual_verification = (aiData.ai_visual_verification || "") + deductionMessage;
+        } else {
+            deductionMessage = `\n\n(Warning: No inventory item found matching feed size ${pelletSize})`;
+            aiData.ai_visual_verification = (aiData.ai_visual_verification || "") + deductionMessage;
+        }
+    }
+    return deductionMessage;
+};
+
 const handleFeedConfirmation = async (req, res, session) => {
     try {
         const message = req.body.message;
@@ -22,48 +67,7 @@ const handleFeedConfirmation = async (req, res, session) => {
         let aiData = session.log_data;
 
         if (text === "yes" || text === "y") {
-            // Do deduction and log
-            const feedAmountStr = String(aiData.metrics?.feed_amount || "").toLowerCase();
-            const amountMatch = feedAmountStr.match(/[\d.]+/);
-            let amount = amountMatch ? parseFloat(amountMatch[0]) : 0;
-            if (feedAmountStr.includes('g') && !feedAmountStr.includes('kg')) {
-                amount = amount / 1000;
-            }
-            const pelletSize = String(aiData.metrics?.pellet_size || "").toLowerCase().replace(/\s/g, '');
-            
-            let deductionMessage = "";
-
-            if (amount > 0) {
-                const inventoryRef = db.collection('inventory');
-                const invSnapshot = await inventoryRef.get();
-                let targetItemDoc = null;
-                
-                invSnapshot.forEach(doc => {
-                    const item = doc.data();
-                    const itemName = (item.item_name || "").toLowerCase().replace(/\s/g, '');
-                    if (itemName.includes('feed') && itemName.includes(pelletSize)) {
-                        targetItemDoc = doc;
-                    }
-                });
-
-                if (targetItemDoc) {
-                    const currentQty = targetItemDoc.data().quantity || 0;
-                    const newQty = Math.max(0, currentQty - amount);
-                    const newStatus = newQty === 0 ? 'out_of_stock' : newQty < 20 ? 'low' : 'in_stock';
-                    
-                    await inventoryRef.doc(targetItemDoc.id).update({
-                        quantity: newQty,
-                        status: newStatus,
-                        last_updated: new Date().toISOString()
-                    });
-                    
-                    deductionMessage = `\n\n(Deducted ${amount} units of ${targetItemDoc.data().item_name} from inventory)`;
-                    aiData.ai_visual_verification = (aiData.ai_visual_verification || "") + deductionMessage;
-                } else {
-                    deductionMessage = `\n\n(Warning: No inventory item found matching feed size ${pelletSize})`;
-                    aiData.ai_visual_verification = (aiData.ai_visual_verification || "") + deductionMessage;
-                }
-            }
+            let deductionMessage = await processFeedingDeduction(aiData, db);
 
             const logEntry = {
                 timestamp: new Date(session.message_time_ms).toISOString(),
@@ -137,4 +141,4 @@ Update the JSON to reflect the correction. Return ONLY raw JSON matching the str
     }
 };
 
-module.exports = { handleFeedConfirmation };
+module.exports = { handleFeedConfirmation, processFeedingDeduction };

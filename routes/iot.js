@@ -59,4 +59,79 @@ router.post('/iotLog', async (req, res) => {
     }
 });
 
+// ============================================================================
+// AUTOMATED FISH FEEDER (NODE B INTEGRATION)
+// ============================================================================
+
+// 1. POST Endpoint: Telemetry Ingest
+router.post('/api/v1/feeders/telemetry', async (req, res) => {
+    // Basic API Key check
+    if (req.headers['x-iot-secret'] !== process.env.IOT_SECRET_KEY) {
+        return res.status(401).send({ error: 'Unauthorized hardware payload verification failed.' });
+    }
+
+    try {
+        const db = admin.firestore();
+        const payload = req.body || {};
+        
+        if (!payload.pond_id) {
+            return res.status(400).send({ error: 'Missing pond_id in payload' });
+        }
+
+        const telemetryEntry = {
+            pond_id: payload.pond_id,
+            hopper_distance_cm: payload.distance_cm || 0,
+            feed_event: payload.feed_triggered || false,
+            hardware_timestamp: payload.hardware_timestamp || null,
+            created_at: admin.firestore.FieldValue.serverTimestamp()
+        };
+
+        await db.collection('feeder_telemetry').add(telemetryEntry);
+        res.status(200).send({ success: true });
+    } catch (error) {
+        console.error('Telemetry ingest failure:', error);
+        res.status(500).send({ error: 'Database write execution failure' });
+    }
+});
+
+// 2. GET Endpoint: Command & Time Sync Polling
+router.get('/api/v1/feeders/status', async (req, res) => {
+    try {
+        const db = admin.firestore();
+        const pondId = req.query.pond;
+
+        if (!pondId) {
+            return res.status(400).send({ error: 'Missing pond query param' });
+        }
+
+        // Calculate current_hour based on EAT (UTC+3)
+        const now = new Date();
+        const eatOffset = 3 * 60 * 60 * 1000;
+        const eatDate = new Date(now.getTime() + eatOffset);
+        const current_hour = eatDate.getUTCHours();
+
+        // Check for pending command in the ponds collection
+        const pondRef = db.collection('ponds').doc(pondId);
+        const pondDoc = await pondRef.get();
+
+        let pending_command = null;
+
+        if (pondDoc.exists && pondDoc.data().pending_command) {
+            pending_command = pondDoc.data().pending_command;
+            
+            // Clear the flag so it doesn't loop
+            await pondRef.update({ pending_command: admin.firestore.FieldValue.delete() });
+        }
+
+        res.status(200).send({
+            current_hour: current_hour,
+            pending_command: pending_command
+        });
+
+    } catch (error) {
+        console.error('Command polling failure:', error);
+        res.status(500).send({ error: 'Command polling execution failure' });
+    }
+});
+
 module.exports = router;

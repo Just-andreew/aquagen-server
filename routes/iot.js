@@ -111,6 +111,18 @@ router.get('/api/v1/feeders/status', async (req, res) => {
         // Atomically claim (and clear) any pending command so it is dispatched exactly once
         const { pond, command } = await feeder.claimPendingCommand(db, pondId);
 
+        // Record live polling heartbeat so the web app knows the feeder is actively connected
+        // Throttled to once every 10 seconds to optimize Firestore writes
+        const lastPingMs = pond?.last_ping_ms || 0;
+        const now = Date.now();
+        if (now - lastPingMs >= 10000) {
+            db.collection('ponds').doc(pondId).set({
+                last_ping: admin.firestore.FieldValue.serverTimestamp(),
+                last_ping_ms: now,
+                online: true
+            }, { merge: true }).catch(err => console.error('Feeder heartbeat write error:', err));
+        }
+
         const calibrationMs = pond?.feeder_config?.calibrationMs ?? pond?.calibration_ms ?? 4000;
 
         // Flat JSON object as specified in Section 3 & 4 of protocol

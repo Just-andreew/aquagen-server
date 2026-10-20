@@ -233,16 +233,28 @@ const processTelemetryUplink = async (db, payload) => {
         const manual = pondData.last_manual_feed;
         if (manual) {
             const reqId = manual.request_id || `legacy_${hardwareTimestamp || Date.now()}`;
-            deductionOutcome = await deductFeed(db, {
-                eventId: `${pondId}_manual_${reqId}`,
-                pondId,
-                inventoryId: manual.feed_inventory_id,
-                grams: manual.estimated_grams,
-                source: 'ESP32_IoT',
-                trigger: 'manual'
-            });
+            
+            // If already deducted when triggered from Web App, do not double-deduct
+            if (manual.already_deducted) {
+                deductionOutcome = {
+                    deducted: true,
+                    skipped: true,
+                    reason: 'already_deducted_on_web_trigger',
+                    change: manual.deducted_change,
+                    unit: manual.deducted_unit
+                };
+            } else {
+                deductionOutcome = await deductFeed(db, {
+                    eventId: `${pondId}_manual_${reqId}`,
+                    pondId,
+                    inventoryId: manual.feed_inventory_id,
+                    grams: manual.estimated_grams,
+                    source: 'ESP32_IoT',
+                    trigger: 'manual'
+                });
+            }
 
-            pondUpdates['last_manual_feed.status'] = deductionOutcome.deducted ? 'completed' : 'completed_no_deduction';
+            pondUpdates['last_manual_feed.status'] = 'completed';
             pondUpdates['last_manual_feed.completed_at'] = admin.firestore.FieldValue.serverTimestamp();
             pondUpdates['last_manual_feed.deduction'] = deductionOutcome;
             pondUpdates['last_manual_feed.final_distance_cm'] = distanceCm;
@@ -274,6 +286,7 @@ const processTelemetryUplink = async (db, payload) => {
         // Associate with pond's configured feed item, or first schedule item
         const schedules = Array.isArray(pondData.schedules) ? pondData.schedules : [];
         const feedId = pondData.default_feed_id || schedules[0]?.feedInventoryId || null;
+        const feedName = schedules[0]?.feedName || 'Standard Feed';
 
         deductionOutcome = await deductFeed(db, {
             eventId: `${pondId}_btn_${hardwareTimestamp || Date.now()}`,
@@ -283,6 +296,17 @@ const processTelemetryUplink = async (db, payload) => {
             source: 'ESP32_IoT',
             trigger: 'button'
         });
+
+        pondUpdates.last_button_feed = {
+            timestamp: admin.firestore.FieldValue.serverTimestamp(),
+            grams: dispensedGrams,
+            feed_id: feedId,
+            feed_name: feedName,
+            distance_cm: distanceCm,
+            hardware_timestamp: hardwareTimestamp,
+            deducted: deductionOutcome?.deducted || false
+        };
+    }
     }
 
     await pondRef.set(pondUpdates, { merge: true });

@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const admin = require('firebase-admin');
+const feeder = require('../controllers/feeder');
 
 // MODULE 2: ESP32 SHORT-POLLING ROUTE (MANUAL DROP TRIGGER)
 router.get('/feederPing', async (req, res) => {
@@ -61,11 +62,14 @@ router.post('/iotLog', async (req, res) => {
 
 // ============================================================================
 // AUTOMATED FISH FEEDER (NODE B INTEGRATION)
+// Adheres strictly to Aquagen Feeder API Protocol (ESP32 & Vercel Final Architecture)
 // ============================================================================
 
-// 1. POST Endpoint: Telemetry Ingest
+// 1. POST Endpoint: Telemetry Ingest (Instant Start, Action Confirmation, Volume Delta)
+// Headers: x-iot-secret
+// Payload: { pond_id, distance_cm, feed_triggered, trigger_source, hardware_timestamp, rssi }
 router.post('/api/v1/feeders/telemetry', async (req, res) => {
-    // Basic API Key check
+    // Global Header Authentication
     if (req.headers['x-iot-secret'] !== process.env.IOT_SECRET_KEY) {
         return res.status(401).send({ error: 'Unauthorized hardware payload verification failed.' });
     }
@@ -73,59 +77,47 @@ router.post('/api/v1/feeders/telemetry', async (req, res) => {
     try {
         const db = admin.firestore();
         const payload = req.body || {};
-        
+
         if (!payload.pond_id) {
             return res.status(400).send({ error: 'Missing pond_id in payload' });
         }
 
-        const telemetryEntry = {
-            pond_id: payload.pond_id,
-            hopper_distance_cm: payload.distance_cm || 0,
-            feed_event: payload.feed_triggered || false,
-            hardware_timestamp: payload.hardware_timestamp || null,
-            created_at: admin.firestore.FieldValue.serverTimestamp()
-        };
-
-        await db.collection('feeder_telemetry').add(telemetryEntry);
-        res.status(200).send({ success: true });
+        const result = await feeder.processTelemetryUplink(db, payload);
+        res.status(200).send({ success: true, ...result });
     } catch (error) {
         console.error('Telemetry ingest failure:', error);
         res.status(500).send({ error: 'Database write execution failure' });
     }
 });
 
-// 2. GET Endpoint: Command & Time Sync Polling
+// 2. GET Endpoint: Command & Configuration Polling
+// Headers: x-iot-secret
+// Query: ?pond=POND_01
+// Response: flat JSON { pending_command, schedule_str, calibration_ms }
 router.get('/api/v1/feeders/status', async (req, res) => {
+    // Global Header Authentication
+    if (req.headers['x-iot-secret'] !== process.env.IOT_SECRET_KEY) {
+        return res.status(401).send({ error: 'Unauthorized hardware payload verification failed.' });
+    }
+
     try {
         const db = admin.firestore();
-        const pondId = req.query.pond;
+        const pondId = req.query.pond ? String(req.query.pond).toUpperCase() : null;
 
         if (!pondId) {
             return res.status(400).send({ error: 'Missing pond query param' });
         }
 
-        // Calculate current_hour based on EAT (UTC+3)
-        const now = new Date();
-        const eatOffset = 3 * 60 * 60 * 1000;
-        const eatDate = new Date(now.getTime() + eatOffset);
-        const current_hour = eatDate.getUTCHours();
+        // Atomically claim (and clear) any pending command so it is dispatched exactly once
+        const { pond, command } = await feeder.claimPendingCommand(db, pondId);
 
-        // Check for pending command in the ponds collection
-        const pondRef = db.collection('ponds').doc(pondId);
-        const pondDoc = await pondRef.get();
+        const calibrationMs = pond?.feeder_config?.calibrationMs ?? pond?.calibration_ms ?? 4000;
 
-        let pending_command = null;
-
-        if (pondDoc.exists && pondDoc.data().pending_command) {
-            pending_command = pondDoc.data().pending_command;
-            
-            // Clear the flag so it doesn't loop
-            await pondRef.update({ pending_command: admin.firestore.FieldValue.delete() });
-        }
-
+        // Flat JSON object as specified in Section 3 & 4 of protocol
         res.status(200).send({
-            current_hour: current_hour,
-            pending_command: pending_command
+            pending_command: command || null,
+            schedule_str: pond?.schedule_str || null,
+            calibration_ms: Number(calibrationMs) || 4000
         });
 
     } catch (error) {

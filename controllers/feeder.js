@@ -218,7 +218,10 @@ const processTelemetryUplink = async (db, payload) => {
         pondUpdates.feeder_state = 'spinning';
         pondUpdates.motor_active = true;
         if (pondData.last_manual_feed && pondData.last_manual_feed.status === 'dispatched') {
-            pondUpdates['last_manual_feed.status'] = 'feeding';
+            pondUpdates.last_manual_feed = {
+                ...pondData.last_manual_feed,
+                status: 'feeding'
+            };
         }
         await pondRef.set(pondUpdates, { merge: true });
         return { scenario: 'instant_start', trigger_source: 'START', state: 'spinning' };
@@ -254,10 +257,13 @@ const processTelemetryUplink = async (db, payload) => {
                 });
             }
 
-            pondUpdates['last_manual_feed.status'] = 'completed';
-            pondUpdates['last_manual_feed.completed_at'] = admin.firestore.FieldValue.serverTimestamp();
-            pondUpdates['last_manual_feed.deduction'] = deductionOutcome;
-            pondUpdates['last_manual_feed.final_distance_cm'] = distanceCm;
+            pondUpdates.last_manual_feed = {
+                ...manual,
+                status: 'completed',
+                completed_at: admin.firestore.FieldValue.serverTimestamp(),
+                deduction: deductionOutcome,
+                final_distance_cm: distanceCm
+            };
         }
     } else if (triggerSource === 'AUTO') {
         // Confirmation: Cycle completed via Node A RTC schedule
@@ -306,7 +312,6 @@ const processTelemetryUplink = async (db, payload) => {
             hardware_timestamp: hardwareTimestamp,
             deducted: deductionOutcome?.deducted || false
         };
-    }
     }
 
     await pondRef.set(pondUpdates, { merge: true });
